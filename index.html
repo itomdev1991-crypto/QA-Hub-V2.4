@@ -394,8 +394,63 @@ const detectionOpts = ['Positive','Negative'];
 
 // ─── GOOGLE SHEETS CONFIG ─────────────────────────────────────────────────────
 // ใส่ URL ของ Google Apps Script Web App ที่ Deploy แล้ว
-const GAS_URL = 'https://script.google.com/macros/s/AKfycbx-J1pq6PHHTYoWsiTRpLSxdWZ0CRr0iPZCmclxDSxF3VgS-xTgFqRTk2b1w3mUnMBtjw/exec';
+const GAS_URL = 'https://script.google.com/macros/s/AKfycbyPD9cmgTDJxMGTwybZTNSbsO4cRvsZtngSazoDtrhoGRt-1BXxwjsS9V-BLDYoPxiUVQ/exec';
 const SS_ID   = '1aEs_ButDhhM-Om_4NjOd-Efeh_XRosjUfRxXhTfaEgs'; // Google Spreadsheet ID
+
+// ─── FIELD ENCRYPTION ────────────────────────────────────────────────────────
+// XOR cipher + base64 — ทำให้ข้อมูลใน Google Sheet อ่านไม่ออกโดยตรง
+// Key ต้องตรงกับ ENCRYPT_KEY ใน Code.gs (อัปเดตทั้งคู่พร้อมกัน)
+const ENCRYPT_KEY = 'QAH@S3cr3tK3y!2025#XZ';  // ← เปลี่ยนได้ แต่ต้องตรงกับ Code.gs
+
+// XOR-encrypt string → base64 prefix "ENC:"
+function encField(str) {
+  if (str === null || str === undefined || str === '') return str;
+  const s = String(str);
+  const k = ENCRYPT_KEY;
+  let out = '';
+  for (let i = 0; i < s.length; i++) {
+    out += String.fromCharCode(s.charCodeAt(i) ^ k.charCodeAt(i % k.length));
+  }
+  // btoa safe: encode to Uint8Array first to handle non-latin chars
+  const bytes = new Uint8Array([...out].map(c => c.charCodeAt(0)));
+  let bin = ''; bytes.forEach(b => bin += String.fromCharCode(b));
+  return 'ENC:' + btoa(bin);
+}
+
+// Decode "ENC:..." back to plain string; returns original if not encrypted
+function decField(str) {
+  if (!str || typeof str !== 'string' || !str.startsWith('ENC:')) return str;
+  try {
+    const bin = atob(str.slice(4));
+    const k = ENCRYPT_KEY;
+    let out = '';
+    for (let i = 0; i < bin.length; i++) {
+      out += String.fromCharCode(bin.charCodeAt(i) ^ k.charCodeAt(i % k.length));
+    }
+    return out;
+  } catch { return str; }
+}
+
+// Fields to encrypt before writing to Sheet, and decrypt after reading
+const ENC_FIELDS = { users: ['email','password'], teams: ['inviteCode'] };
+
+// Wrap a user/team object: encrypt sensitive fields before insert/update
+function encryptObj(sheetKey, obj) {
+  const fields = ENC_FIELDS[sheetKey];
+  if (!fields) return obj;
+  const copy = { ...obj };
+  fields.forEach(f => { if (copy[f] != null && copy[f] !== '') copy[f] = encField(copy[f]); });
+  return copy;
+}
+
+// Unwrap: decrypt after reading from Sheet
+function decryptObj(sheetKey, obj) {
+  const fields = ENC_FIELDS[sheetKey];
+  if (!fields) return obj;
+  const copy = { ...obj };
+  fields.forEach(f => { if (copy[f]) copy[f] = decField(copy[f]); });
+  return copy;
+}
 
 // ─── API CLIENT ───────────────────────────────────────────────────────────────
 // GAS ไม่รองรับ CORS preflight สำหรับ POST ปกติ
@@ -414,7 +469,8 @@ const api = {
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     const json = await res.json();
     if (!json.ok) throw new Error(json.error);
-    return json.data;
+    // Decrypt sensitive fields after reading from Sheet
+    return (json.data || []).map(obj => decryptObj(sheet, obj));
   },
 
   // Write — encode payload เป็น base64 UTF-8 ส่งผ่าน GET (ไม่มี CORS preflight)
@@ -426,7 +482,15 @@ const api = {
       console.error('[QAHub]', msg, payload);
       throw new Error(msg);
     }
-    const jsonStr = JSON.stringify(payload);
+    // Encrypt sensitive fields before writing to Sheet
+    const encPayload = { ...payload };
+    if (encPayload.data && typeof encPayload.data === 'object' && !Array.isArray(encPayload.data)) {
+      encPayload.data = encryptObj(payload.sheet, encPayload.data);
+    }
+    if (encPayload.data && Array.isArray(encPayload.data)) {
+      encPayload.data = encPayload.data.map(item => encryptObj(payload.sheet, item));
+    }
+    const jsonStr = JSON.stringify(encPayload);
     // Encode UTF-8 bytes -> base64 using loop (prevents stack overflow on large payloads)
     const bytes   = new TextEncoder().encode(jsonStr);
     let _bin = ''; for (let i = 0; i < bytes.length; i++) _bin += String.fromCharCode(bytes[i]);
