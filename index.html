@@ -394,7 +394,7 @@ const detectionOpts = ['Positive','Negative'];
 
 // ─── GOOGLE SHEETS CONFIG ─────────────────────────────────────────────────────
 // ใส่ URL ของ Google Apps Script Web App ที่ Deploy แล้ว
-const GAS_URL = 'https://script.google.com/macros/s/AKfycbyPD9cmgTDJxMGTwybZTNSbsO4cRvsZtngSazoDtrhoGRt-1BXxwjsS9V-BLDYoPxiUVQ/exec';
+const GAS_URL = 'https://script.google.com/macros/s/AKfycbx-J1pq6PHHTYoWsiTRpLSxdWZ0CRr0iPZCmclxDSxF3VgS-xTgFqRTk2b1w3mUnMBtjw/exec';
 const SS_ID   = '1aEs_ButDhhM-Om_4NjOd-Efeh_XRosjUfRxXhTfaEgs'; // Google Spreadsheet ID
 
 // ─── FIELD ENCRYPTION ────────────────────────────────────────────────────────
@@ -406,6 +406,7 @@ const ENCRYPT_KEY = 'QAH@S3cr3tK3y!2025#XZ';  // ← เปลี่ยนได
 function encField(str) {
   if (str === null || str === undefined || str === '') return str;
   const s = String(str);
+  if (s.startsWith('ENC:')) return s; // already encrypted — skip
   const k = ENCRYPT_KEY;
   let out = '';
   for (let i = 0; i < s.length; i++) {
@@ -450,6 +451,35 @@ function decryptObj(sheetKey, obj) {
   const copy = { ...obj };
   fields.forEach(f => { if (copy[f]) copy[f] = decField(copy[f]); });
   return copy;
+}
+
+// ── Migration: ตรวจและเข้ารหัสข้อมูลเก่าที่ยังเป็น plain-text ──────────────
+// เรียกหลัง load ข้อมูลจาก Sheet — หากพบ row ที่ field sensitive ยังไม่มี "ENC:"
+// จะ update ทุก row นั้นขึ้น Sheet ใหม่พร้อมค่าที่เข้ารหัสแล้ว
+async function migrateEncryption(sheetKey, rows) {
+  const fields = ENC_FIELDS[sheetKey];
+  if (!fields || !rows || rows.length === 0) return;
+
+  // หา rows ที่มี field ใด field หนึ่งยังไม่ได้เข้ารหัส
+  const needsMigration = rows.filter(obj =>
+    fields.some(f => {
+      const v = obj[f];
+      return v != null && v !== '' && typeof v === 'string' && !v.startsWith('ENC:');
+    })
+  );
+
+  if (needsMigration.length === 0) return; // ทุก row เข้ารหัสแล้ว
+
+  console.log(`[QAHub] 🔐 Migrating ${needsMigration.length} unencrypted row(s) in "${sheetKey}"...`);
+
+  // อัปเดตทีละ row (update ใช้ encryptObj ผ่าน _write อัตโนมัติ)
+  const updates = needsMigration.map(obj =>
+    api.update(sheetKey, obj).catch(e =>
+      console.warn(`[QAHub] migrate update failed id=${obj.id}:`, e.message)
+    )
+  );
+  await Promise.all(updates);
+  console.log(`[QAHub] ✅ Migration done for "${sheetKey}"`);
 }
 
 // ─── API CLIENT ───────────────────────────────────────────────────────────────
@@ -612,6 +642,11 @@ function App() {
       setLoginLogsState(ll);
       setPendingMembersState(pm);
       setLoading(false);
+
+      // ── Auto-migrate: เข้ารหัสข้อมูลเก่าที่ยังเป็น plain-text ──
+      // ทำงาน background ไม่ block UI (ข้อมูลใน state เป็น plain แล้วจาก decryptObj)
+      migrateEncryption('users', u).catch(e => console.warn('[QAHub] migrate users:', e.message));
+      migrateEncryption('teams', te).catch(e => console.warn('[QAHub] migrate teams:', e.message));
     }).catch(e => {
       setSyncErr(e.message);
       // Fallback to localStorage
