@@ -394,7 +394,7 @@ const detectionOpts = ['Positive','Negative'];
 
 // ─── GOOGLE SHEETS CONFIG ─────────────────────────────────────────────────────
 // ใส่ URL ของ Google Apps Script Web App ที่ Deploy แล้ว
-const GAS_URL = 'https://script.google.com/macros/s/AKfycbyxt7GQyiz4NZ8yqEuSLOixhk5b_E-uCFoXqjGA_yCxDR3mJjabmlIRJsjqhtgOA33clA/exec';
+const GAS_URL = 'https://script.google.com/macros/s/AKfycbx-J1pq6PHHTYoWsiTRpLSxdWZ0CRr0iPZCmclxDSxF3VgS-xTgFqRTk2b1w3mUnMBtjw/exec';
 const SS_ID   = '1aEs_ButDhhM-Om_4NjOd-Efeh_XRosjUfRxXhTfaEgs'; // Google Spreadsheet ID
 
 // ─── API CLIENT ───────────────────────────────────────────────────────────────
@@ -878,7 +878,7 @@ function App() {
             page === 'task-detail' && h(TaskDetailPage, { ...ctx, navigate }),
             page === 'defects' && h(DefectsPage, { ...ctx, navigate }),
             page === 'team-settings' && h(TeamSettingsPage, { ...ctx, navigate }),
-            page === 'activity-log' && h(ActivityLogPage, { ...ctx, navigate }),
+            page === 'activity-log' && h(ActivityLogPage, { ...ctx, navigate, members, currentTeam }),
           )
         )
       )
@@ -1870,17 +1870,69 @@ function TaskDetailPage({ navCtx, projects, tasks, testCases, setTestCases, defe
 
   const exportTCs = (scope) => {
     let list = scope==='task' ? taskTCs : scope==='selected' ? taskTCs.filter(tc=>selected.includes(tc.id)) : taskTCs;
-    const rows = list.map(tc => ({
-      Title:tc.title, Project:project.name, Task:task.name, Priority:tc.priority, Detection:tc.detection,
-      Status:tc.status, 'Scenario Description':tc.scenarioDescription, 'Tags/Labels':tc.tags,
-      'Test Data':tc.testData, 'Test Steps':(tc.steps||[]).map((s,i)=>`Step ${i+1}: ${s.action}`).join('\n'),
-      'Expected Result':(tc.steps||[]).map(s=>s.expected).join('\n'),
-      'Actual Result':(tc.steps||[]).map(s=>s.actual).join('\n'),
-    }));
+
+    // สร้าง rows แบบเดียวกับ Template / Import format
+    // — TC header row: Title*, Project*, Task*, ... + Step 1
+    // — Step rows (2+): Title* ว่าง + step ถัดไป
+    const headerRow = ['Title*','Project*','Task*','Priority','Detection','Status','Scenario Description','Tags / Labels','Test Data','Test Steps','Expected Result','Actual Result'];
+    const dataRows = [];
+    list.forEach(tc => {
+      const steps = tc.steps && tc.steps.length ? tc.steps : [{ action:'', expected:'', actual:'' }];
+      steps.forEach((s, i) => {
+        if (i === 0) {
+          dataRows.push([
+            tc.title, project.name, task.name,
+            tc.priority, tc.detection, tc.status,
+            tc.scenarioDescription||'', tc.tags||'', tc.testData||'',
+            s.action||'', s.expected||'', s.actual||''
+          ]);
+        } else {
+          dataRows.push(['','','','','','','','','', s.action||'', s.expected||'', s.actual||'']);
+        }
+      });
+    });
+
     const wb = XLSX.utils.book_new();
-    const ws = XLSX.utils.json_to_sheet(rows);
-    XLSX.utils.book_append_sheet(wb, ws, 'TestCases');
+    const ws = XLSX.utils.aoa_to_sheet([headerRow, ...dataRows]);
+
+    // Column widths (same as template)
+    const colWidths = [18,12,10,10,12,14,20,22,16,18,18,18];
+    ws['!cols'] = colWidths.map(w=>({wch:w}));
+
+    // Styles
+    const headerStyle = {
+      font:{ bold:true, color:{ rgb:'FFFFFF' }, sz:11 },
+      fill:{ patternType:'solid', fgColor:{ rgb:'1E3A5F' } },
+      alignment:{ horizontal:'center', vertical:'center', wrapText:true },
+      border:{ top:{style:'thin',color:{rgb:'FFFFFF'}}, bottom:{style:'thin',color:{rgb:'FFFFFF'}}, left:{style:'thin',color:{rgb:'FFFFFF'}}, right:{style:'thin',color:{rgb:'FFFFFF'}} }
+    };
+    const tcTitleStyle = {
+      font:{ bold:true, color:{ rgb:'0F2A4A' }, sz:10 },
+      fill:{ patternType:'solid', fgColor:{ rgb:'D6E8FA' } },
+      alignment:{ vertical:'center', wrapText:true },
+      border:{ top:{style:'thin',color:{rgb:'A0BFD8'}}, bottom:{style:'thin',color:{rgb:'A0BFD8'}}, left:{style:'thin',color:{rgb:'A0BFD8'}}, right:{style:'thin',color:{rgb:'A0BFD8'}} }
+    };
+    const stepStyle = {
+      font:{ color:{ rgb:'374151' }, sz:10 },
+      fill:{ patternType:'solid', fgColor:{ rgb:'FFFFFF' } },
+      alignment:{ vertical:'center', wrapText:true },
+      border:{ top:{style:'thin',color:{rgb:'D1DAE8'}}, bottom:{style:'thin',color:{rgb:'D1DAE8'}}, left:{style:'thin',color:{rgb:'D1DAE8'}}, right:{style:'thin',color:{rgb:'D1DAE8'}} }
+    };
+
+    const totalRows = 1 + dataRows.length;
+    const totalCols = headerRow.length;
+    for (let R = 0; R < totalRows; R++) {
+      for (let C = 0; C < totalCols; C++) {
+        const addr = XLSX.utils.encode_cell({ r:R, c:C });
+        if (!ws[addr]) ws[addr] = { t:'s', v:'' };
+        if (R === 0) { ws[addr].s = headerStyle; }
+        else { ws[addr].s = dataRows[R-1][0] !== '' ? tcTitleStyle : stepStyle; }
+      }
+    }
+    ws['!rows'] = [{ hpt:22 }];
+
     const fname = scope==='task' ? task.name : scope==='selected' ? 'Selected_TCs' : project.name;
+    XLSX.utils.book_append_sheet(wb, ws, 'TestCases');
     XLSX.writeFile(wb, `${fname.replace(/\s+/g,'_')}_TestCases.xlsx`);
     showToast('Export สำเร็จ');
   };
@@ -2922,12 +2974,21 @@ function PendingApprovalTab({ pendingMembers, currentTeam, users, approvePending
 }
 
 // ─── ACTIVITY LOG PAGE ───────────────────────────────────────────────────────
-function ActivityLogPage({ logs, loginLogs, users, isAdmin }) {
+function ActivityLogPage({ logs, loginLogs, users, isAdmin, members, currentTeam }) {
   const [tab, setTab] = useState('activity');
   const [search, setSearch] = useState('');
 
-  const filtLogs = logs.filter(l => !search || l.action.toLowerCase().includes(search.toLowerCase()) || l.detail?.toLowerCase().includes(search.toLowerCase()) || l.userName?.toLowerCase().includes(search.toLowerCase()));
-  const filtLogin = loginLogs.filter(l => !search || l.userName?.toLowerCase().includes(search.toLowerCase()));
+  // เฉพาะ userId ที่เป็นสมาชิกทีมปัจจุบัน
+  const teamMemberIds = useMemo(() => {
+    if (!currentTeam) return new Set();
+    return new Set((members||[]).filter(m => m.teamId === currentTeam.id).map(m => m.userId));
+  }, [members, currentTeam]);
+
+  const teamLogs = logs.filter(l => teamMemberIds.has(l.userId));
+  const teamLoginLogs = loginLogs.filter(l => teamMemberIds.has(l.userId));
+
+  const filtLogs = teamLogs.filter(l => !search || l.action.toLowerCase().includes(search.toLowerCase()) || l.detail?.toLowerCase().includes(search.toLowerCase()) || l.userName?.toLowerCase().includes(search.toLowerCase()));
+  const filtLogin = teamLoginLogs.filter(l => !search || l.userName?.toLowerCase().includes(search.toLowerCase()));
 
   return h('div',null,
     h('div',{className:'page-header'},h('div',null,h('h1',{className:'page-title'},'Activity Log'),h('p',{className:'page-subtitle'},'ประวัติการใช้งานระบบ (Admin only)'))),
